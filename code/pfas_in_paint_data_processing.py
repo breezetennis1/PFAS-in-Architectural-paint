@@ -26,40 +26,108 @@ from matplotlib.colors import LinearSegmentedColormap
 matplotlib.use("Qt5Agg")
 from sklearn.metrics import r2_score
 import scipy.stats as stats
-
+from scipy.stats import norm
+from SALib.analyze import sobol as sobol_analyze
+from SALib.sample import sobol
+from joblib import Parallel, delayed
+from matplotlib.patches import Patch
+from pathlib import Path
 
 sales_data = {'year':[2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025],
               'sales': [815.2, 824.9, 856.5, 839.3, 813.2, 790.7, 812, 827.6]}  # sales unit: million gallons
 sales_df = pd.DataFrame(sales_data)
 sales_df.set_index('year', inplace=True)
 
-
-ResBuildingPath = 'C:/Users/mchen48/Box/01 Research/PFASs/PFASs_in_Carpet/Housing prediction/Peter/DJ_Data'
-ResStock_SF = pd.read_csv(f'{ResBuildingPath}/Stock_SF_m2.csv')
-ResStock_MF = pd.read_csv(f'{ResBuildingPath}/Stock_MF_m2.csv')
-ResStock_MH = pd.read_csv(f'{ResBuildingPath}/Stock_MH_m2.csv')
-ResStock_National = ResStock_SF.copy()
-ResStock_National.iloc[:, 1:] = ResStock_SF.iloc[:, 1:] + ResStock_MF.iloc[:, 1:] + ResStock_MH.iloc[:, 1:]
-
-ResCon_SF = pd.read_csv(f'{ResBuildingPath}/Con_SF_m2.csv')
-ResCon_MF = pd.read_csv(f'{ResBuildingPath}/Con_MF_m2.csv')
-ResCon_MH = pd.read_csv(f'{ResBuildingPath}/Con_MH_m2.csv')
-ResCon_National = ResCon_SF.copy()
-ResCon_National.iloc[:, 1:] = ResCon_SF.iloc[:, 1:] + ResCon_MF.iloc[:, 1:] + ResCon_MH.iloc[:, 1:]
-
-ResDem_SF = pd.read_csv(f'{ResBuildingPath}/Dem_SF_m2.csv')
-ResDem_MF = pd.read_csv(f'{ResBuildingPath}/Dem_MF_m2.csv')
-ResDem_MH = pd.read_csv(f'{ResBuildingPath}/Dem_MH_m2.csv')
-ResDem_National = ResDem_SF.copy()
-ResDem_National.iloc[:, 1:] = ResDem_SF.iloc[:, 1:] + ResDem_MF.iloc[:, 1:] + ResDem_MH.iloc[:, 1:]
-
-# county level population and national population from 2020-2060
-pop_county = pd.read_csv(f'{ResBuildingPath}/CountyPopulation.csv')
 # drop the counties of Alaska and Hawaii
 drop_codes = [2013, 2016, 2020, 2050, 2060, 2068, 2070, 2090, 2100, 2105, 2110, 2122, 2130, 2150, 2158, 2164, 2170,
               2180, 2185, 2188, 2195, 2198, 2220, 2230, 2240, 2261, 2275, 2282, 2290, 15001, 15003, 15005, 15007, 15009]
-pop_county_conti = pop_county[~pop_county['County'].isin(drop_codes)].reset_index(drop=True)
-pop_county_conti.rename(columns={'County': 'GeoID'},inplace=True)
+
+
+hist_path = Path(r"C:/Users/mchen48/Box/01 Research/PFASs/PFASs_in_Carpet/Housing prediction/Peter/DJ_Data/building_2000_to_2020")
+full_path = Path(r"C:/Users/mchen48/Box/01 Research/PFASs/PFASs_in_Carpet/Housing prediction/Peter/DJ_Data")
+
+
+# ---------------------------
+# helper functions
+# ---------------------------
+def load_hist_2000_2019(path, filename, drop_codes):
+    """Load 2000–2020 file, drop 2020, drop unwanted GeoIDs, return 2000–2019."""
+    df = pd.read_csv(path / filename)
+    df.columns = df.columns.astype(str)
+    df = df.drop(columns=["2020"])
+    df = df[~df["GeoID"].isin(drop_codes)].reset_index(drop=True)
+    return df
+
+
+def load_and_merge_full(hist_df, path, filename, how="inner"):
+    """Load 2020–2060 file and merge with 2000–2019 historical file on GeoID."""
+    df = pd.read_csv(path / filename)
+    df.columns = df.columns.astype(str)
+    merged = pd.merge(hist_df, df, on="GeoID", how=how)
+    return merged
+
+
+def build_national(df_sf, df_mf, df_mh):
+    """Sum SF, MF, and MH into a national dataframe."""
+    df_nat = df_sf.copy()
+    df_nat.iloc[:, 1:] = df_sf.iloc[:, 1:] + df_mf.iloc[:, 1:] + df_mh.iloc[:, 1:]
+    return df_nat
+
+
+# ---------------------------
+# file groups
+# ---------------------------
+groups = {
+    "Stock": ["Stock_SF_m2.csv", "Stock_MF_m2.csv", "Stock_MH_m2.csv"],
+    "Con":   ["Con_SF_m2.csv",   "Con_MF_m2.csv",   "Con_MH_m2.csv"],
+    "Dem":   ["Dem_SF_m2.csv",   "Dem_MF_m2.csv",   "Dem_MH_m2.csv"],
+}
+
+# ---------------------------
+# load historical 2000–2019
+# ---------------------------
+hist_dfs = {}
+for category, files in groups.items():
+    for file in files:
+        key = file.replace(".csv", "")   # e.g., Stock_SF_m2
+        hist_dfs[key] = load_hist_2000_2019(hist_path, file, drop_codes)
+
+# ---------------------------
+# merge with 2020–2060
+# ---------------------------
+full_dfs = {}
+for category, files in groups.items():
+    for file in files:
+        key = file.replace(".csv", "")   # e.g., Stock_SF_m2
+        full_dfs[key] = load_and_merge_full(hist_dfs[key], full_path, file)
+
+# ---------------------------
+# assign back to your original variable names
+# ---------------------------
+ResStock_SF = full_dfs["Stock_SF_m2"]
+ResStock_MF = full_dfs["Stock_MF_m2"]
+ResStock_MH = full_dfs["Stock_MH_m2"]
+
+ResCon_SF = full_dfs["Con_SF_m2"]
+ResCon_MF = full_dfs["Con_MF_m2"]
+ResCon_MH = full_dfs["Con_MH_m2"]
+
+ResDem_SF = full_dfs["Dem_SF_m2"]
+ResDem_MF = full_dfs["Dem_MF_m2"]
+ResDem_MH = full_dfs["Dem_MH_m2"]
+
+# ---------------------------
+# national totals
+# ---------------------------
+ResStock_National = build_national(ResStock_SF, ResStock_MF, ResStock_MH)
+ResCon_National = build_national(ResCon_SF, ResCon_MF, ResCon_MH)
+ResDem_National = build_national(ResDem_SF, ResDem_MF, ResDem_MH)
+
+pop_county = pd.read_csv('C:/Users/mchen48/Box/01 Research/PFASs/PFASs_in_Carpet/United_States_Pop_data/'
+                         'Contiguous US population 1990-2060.csv')
+pop_county = pop_county.drop(columns=['StID', 'County,State', '1990', '1991', '1992', '1993',
+                                      '1994', '1995', '1996', '1997', '1998', '1999'])
+pop_county_conti = pop_county.copy()
 National_pop = pd.DataFrame(pop_county_conti.iloc[:, 1:].sum(), columns=['national_pop'])
 National_pop.index = pd.to_numeric(National_pop.index, errors='coerce').astype('int64')
 National_pop = National_pop.rename_axis('year')
@@ -67,10 +135,11 @@ National_pop.to_csv('national_pop.csv', index=False)
 pop_county_conti.to_csv('pop_county_conti.csv', index=False)
 
 # scaling residential building stock and construction to million m2
-National_StockSum = pd.DataFrame(ResStock_National.iloc[:, 1:].sum(), columns=['sum'])/1000000  # in the unit of million
-# m2
+National_StockSum = pd.DataFrame(ResStock_National.iloc[:, 1:].sum(), columns=['sum'])/1000000  # in the unit of million # m2
+National_StockSum.to_csv('National_StockSum.csv', index=False)
 National_ConsSum = pd.DataFrame(ResCon_National.iloc[:, 1:].sum(), columns=['sum'])/1000000  # in the unit of million m2
 National_DemSum = pd.DataFrame(ResDem_National.iloc[:, 1:].sum(), columns=['sum'])/1000000  # in the unit of million m2
+National_DemSum.to_csv('National_DemSum.csv', index=False)
 # rename columns for clarity
 sales_df = sales_df.rename(columns={'sales': 'sales_million_gallons'})
 National_StockSum = National_StockSum.rename(columns={'sum': 'stock_million_m2'})
@@ -130,77 +199,55 @@ lfg_high = s_iqr.quantile(0.75)
 # PFAS concentration is in the unit of µg/g
 # 'con' represents concentration, 'vola' represents volatile, 'nonVola' represents NonVolatile
 params_scenarios = pd.DataFrame({
-    'mean': {'perCap_sales': mean,  # in the unit of gallon/person
-             'lumbar_interior': 0.5,  # in the unit of m/m2
-             'density': 5.11,   # in the unit of kg/gallon
-             'con_vola_indoor': 0.49,  # in the unit of µg/g
-             'con_nonVola_indoor': 15,  # in the unit of µg/g
-             'con_vola_outdoor': 12,  # in the unit of µg/g
-             'con_nonVola_outdoor': 23,  # in the unit of µg/g
-             'leachate_con_nonVola': 2493,  # In the unit of ng/L
-             'LFG_con_vola': 6000,  # In the unit of ng/m3
+    'mean': {'Per capital sales': mean,  # in the unit of gallon/person
+             'Partition line density': 0.5,  # in the unit of m/m2
+             'Exterior wall density': 0.68,  # in the unit of m2/m2
+             'Paint density': 5.11,   # in the unit of kg/gallon
+             'Con_vola_indoor': 0.49,  # in the unit of µg/g
+             'Con_nonVola_indoor': 6.14,  # in the unit of µg/g
+             'Con_vola_outdoor': 12,  # in the unit of µg/g
+             'Con_nonVola_outdoor': 23,  # in the unit of µg/g
+             'Leachate_con_nonVola': 2493,  # In the unit of ng/L
+             'LFG_con_vola': 18490,  # In the unit of ng/m3
              'LFG_gen_rate': lfg_medium,  # in the unit of m3/ha/day
-             'omega': 0.005},
-    'high': {'perCap_sales': ci_upper,  # in the unit of gallon/person
-             'lumbar_interior': 0.6,  # in the unit of m/m2
-             'density': 5.68,   # in the unit of kg/gallon
-             'con_vola_indoor': 1.85,  # in the unit of µg/g
-             'con_nonVola_indoor': 19.41,  # in the unit of µg/g
-             'con_vola_outdoor': 28,   # in the unit of µg/g
-             'con_nonVola_outdoor': 42,  # in the unit of µg/g
-             'leachate_con_nonVola': 5070,  # In the unit of ng/L
-             'LFG_con_vola': 6500,  # In the unit of ng/m3
+             'Loss rate_nonVola_indoor': 0.0005,
+             'Loss rate_nonVola_outdoor': 0.005,
+             'HL_vola_indoor': 8,  # represent the half-life of interior volatile PFAS, in the unit of year
+             'HL_vola_outdoor': 5  # represent the half-life of exterior volatile PFAS, in the unit of year
+             },
+    'high': {'Per capital sales': ci_upper,  # in the unit of gallon/person
+             'Partition line density': 0.6,  # in the unit of m/m2
+             'Exterior wall density': 0.83,  # in the unit of m2/m2
+             'Paint density': 5.68,   # in the unit of kg/gallon
+             'Con_vola_indoor': 1.85,  # in the unit of µg/g
+             'Con_nonVola_indoor': 7.94,  # in the unit of µg/g
+             'Con_vola_outdoor': 28,   # in the unit of µg/g
+             'Con_nonVola_outdoor': 42,  # in the unit of µg/g
+             'Leachate_con_nonVola': 5070,  # In the unit of ng/L
+             'LFG_con_vola': 34566,  # In the unit of ng/m3
              'LFG_gen_rate': lfg_high,  # in the unit of m3/ha/day
-             'omega': 0.01},
-    'low': {'perCap_sales': ci_lower,  # in the unit of gallon/person
-            'lumbar_interior': 0.4,  # in the unit of m/m2
-            'density': 4.54,   # in the unit of kg/gallon
-            'con_vola_indoor': 0.39,  # in the unit of µg/g
-            'con_nonVola_indoor': 12,  # in the unit of µg/g
-            'con_vola_outdoor': 9,  # in the unit of µg/g
-            'con_nonVola_outdoor': 20.16,  # in the unit of µg/g
-            'leachate_con_nonVola': 870,  # In the unit of ng/L
-            'LFG_con_vola': 3200,  # In the unit of ng/m3
+             'Loss rate_nonVola_indoor': 0.001,
+             'Loss rate_nonVola_outdoor': 0.01,
+             'HL_vola_indoor': 7,
+             'HL_vola_outdoor': 4
+             },
+    'low': {'Per capital sales': ci_lower,  # in the unit of gallon/person
+            'Partition line density': 0.4,  # in the unit of m/m2
+            'Exterior wall density': 0.53,  # in the unit of m2/m2
+            'Paint density': 4.54,   # in the unit of kg/gallon
+            'Con_vola_indoor': 0.39,  # in the unit of µg/g
+            'Con_nonVola_indoor': 4.19,  # in the unit of µg/g
+            'Con_vola_outdoor': 9,  # in the unit of µg/g
+            'Con_nonVola_outdoor': 20.16,  # in the unit of µg/g
+            'Leachate_con_nonVola': 870,  # In the unit of ng/L
+            'LFG_con_vola': 8356,  # In the unit of ng/m3
             'LFG_gen_rate': lfg_low,  # In the unit of m3/ha/day
-            'omega': 0.001}
+            'Loss rate_nonVola_indoor': 0.0001,
+            'Loss rate_nonVola_outdoor': 0.001,
+            'HL_vola_indoor': 9,
+            'HL_vola_outdoor': 6
+            }
 })
-
-
-def backcast_2019(df, col='per_cap_stock', t0=2020, fit_end=2030):
-    """
-    Backcast per-capita stock for 2019 using a saturating exponential:
-        y(t) = L - A * exp(-k * (t - t0))
-    df: DataFrame with columns ['year', col] for years >= 2020
-    t0: reference year for the model (default 2020)
-    fit_end: last year used for fitting (inclusive), e.g., 2030
-    Returns: y_2019 (float), df_with_2019 (DataFrame), (L, A, k)
-    """
-    s = df.set_index('year')[col].astype(float)
-    years_available = s.index.values
-    assert t0 in years_available, "Series must include the reference year t0."
-    fit_end = int(min(fit_end, years_available.max()))
-
-    # model
-    def f(t, L, A, k):
-        return L-A*np.exp(-k*(t-t0))
-
-    t_fit = np.arange(t0, fit_end+1, dtype=float)
-    y_fit = s.loc[t_fit.astype(int)].values
-
-    # initial guesses & bounds (L >= max(y), A>=0, k>=0)
-    L0 = y_fit.max()+0.1*(y_fit.max()-y_fit.min()+1.0)
-    A0 = max(L0-y_fit[0], 1e-6)
-    k0 = 0.05
-    params, _ = curve_fit(
-        f, t_fit, y_fit,
-        p0=(L0, A0, k0),
-        bounds=([y_fit.max(), 0.0, 0.0], [np.inf, np.inf, 1.0]),
-        maxfev=10000
-    )
-    y2019 = float(f(2019.0, *params))
-    s_full = pd.concat([pd.Series({2019: y2019}), s]).sort_index()
-    df_out = s_full.rename(col).reset_index().rename(columns={'index': 'year'})
-    return y2019, df_out, tuple(map(float, params))
 
 
 # define the model for 6:2 FTOH emission during the lifetime with a two Phase emission (fast and slow)
@@ -220,7 +267,7 @@ def yearly_bins(f_fast, tau_fast_star, tau_slow, H=20):
     return f_fast*comp(tau_fast_star) + (1.0-f_fast)*comp(tau_slow)
 
 
-def repaint_residual_matrix_vola(f_fast, tau_fast, tau_slow, start=2000, end=2060, repaint_every=5, first_col=2020):
+def repaint_residual_matrix_vola(f_fast, tau_fast, tau_slow, start=1999, end=2060, repaint_every=5, first_col=2000):
     """
     Two-phase residual fraction:
         S(t)=f_fast*exp(-t/tau_fast)+(1-f_fast)*exp(-t/tau_slow)
@@ -254,10 +301,10 @@ def repaint_residual_matrix_vola(f_fast, tau_fast, tau_slow, start=2000, end=206
 
 # construct the repaint residual matrix for nonVolatile PFAS
 def repaint_residual_matrix_nonvola(omega=0.005,
-                                    start=2000,
+                                    start=1999,
                                     end=2060,
                                     repaint_every=5,
-                                    first_col=2020):
+                                    first_col=2000):
     """
     Non-volatile PFAS residual fraction (discrete, yearly):
         S(t) = (1-omega)**t
@@ -288,10 +335,10 @@ def repaint_residual_matrix_nonvola(omega=0.005,
 
 
 def demo_residual_matrix_PaintMass(r=0.6,  # assuming that 40% of the paint mass is loss before demolition
-                                   start=2000,
+                                   start=1999,
                                    end=2060,
                                    repaint_every=5,
-                                   first_col=2020):
+                                   first_col=2000):
     """
     Non-volatile PFAS residual fraction (discrete, yearly):
         S(t) = (1-omega)**t
@@ -321,47 +368,28 @@ def demo_residual_matrix_PaintMass(r=0.6,  # assuming that 40% of the paint mass
     return df
 
 
-def compute_s0_emissions_ratio(resid_ratio_mat, resid_ratio_2019, start=2020, end=2060):
-    # align rows
-    df = resid_ratio_mat.loc[resid_ratio_2019.index].copy()
-
-    # pick year columns (assumes int column labels)
-    years = [y for y in df.columns if start <= y <= end]
-    Y = df.loc[:, years]
-
-    # prev_year - current_year for all columns using a shift
-    emit = Y.shift(axis=1) - Y
-
-    # fix the first column (uses the 2019 baseline)
-    emit.iloc[:, 0] = resid_ratio_2019[2019].values - Y.iloc[:, 0].values
-
-    # column totals
-    totals = emit.sum(axis=0)
-    return totals
-
-
 def compute_pfas_predict(
         scenario: str = 'mean',
         *,
-        tau_slow_indoor_half_life=8,
-        tau_slow_outdoor_half_life=5,
+        params=None,
         repaint_every_indoor=5,
         repaint_every_outdoor=8,
         waterborne_ratio=0.85,
         residential_ratio=0.7,
         ratio_indoor=0.67,
         ratio_outdoor=0.33,
-        exterior_ratio=0.68,
         height=2.85,
         paint_UsingDensity=37.1612,   # m2/gallon
         SA=140,                       # tonnes/ha (landfill surface area normalization)
         LG=2*(76/47),                 # m3/ha/day
-        pop_2019=328_239_523,  # ref (https://www.census.gov/newsroom/press-releases/2019/popest-nation.html)
-        start_year=2020,
+        start_year=2000,
         end_year=2060
 ):
-    assert scenario in {"low", "mean", "high"}
-    p = lambda k: params_scenarios.loc[k, scenario]
+    if params is None:
+        assert scenario in {"low", "mean", "high"}
+        p = lambda k: params_scenarios.loc[k, scenario]
+    else:
+        p = lambda k: params[k]
 
     years = np.arange(start_year, end_year + 1, dtype=int)
     H = years.size
@@ -369,7 +397,7 @@ def compute_pfas_predict(
     # --- Sales & basic frames (2020..2060) ---
     sales_predict = pd.DataFrame({
         "year": years,
-        "sales": National_pop['national_pop'].reindex(years).to_numpy() * p('perCap_sales') / 1000000  # million gal
+        "sales": National_pop['national_pop'].reindex(years).to_numpy() * p('Per capital sales') / 1000000  # million gal
     })
     PFAS_predict = sales_predict.copy()
     PFAS_predict['stock_ResBuilding'] = National_StockSum['stock_million_m2'].reindex(years).to_numpy()
@@ -378,24 +406,24 @@ def compute_pfas_predict(
     per_cap_stock = (National_StockSum['stock_million_m2'].reindex(years) * 1000000
                      / National_pop['national_pop'].reindex(years))
     df_tmp = pd.DataFrame({"year": years, "per_cap_stock": per_cap_stock.to_numpy()})
-    per_cap_stock_2019, _, _ = backcast_2019(df_tmp[['year', 'per_cap_stock']],
-                                             col='per_cap_stock', t0=start_year, fit_end=min(2030, end_year))
-    NationalStock_2019 = per_cap_stock_2019 * pop_2019 / 1000000  # million m2
+    # per_cap_stock_2019, _, _ = backcast_2019(df_tmp[['year', 'per_cap_stock']],
+    #                                          col='per_cap_stock', t0=start_year, fit_end=min(2030, end_year))
+    # NationalStock_2019 = per_cap_stock_2019 * pop_2019 / 1000000  # million m2
 
     # --- Paint mass & immediate application flows (F3) ---
-    PFAS_predict['paint_mass'] = PFAS_predict['sales'] * p('density')  # million kg
+    PFAS_predict['paint_mass'] = PFAS_predict['sales'] * p('Paint density')  # million kg
     PFAS_predict['F3_vola_indoor'] = (PFAS_predict['paint_mass'] * waterborne_ratio * residential_ratio *
-                                      ratio_indoor * p('con_vola_indoor') / 1000)
+                                      ratio_indoor * p('Con_vola_indoor') / 1000)
     PFAS_predict['F3_nonVola_indoor'] = (PFAS_predict['paint_mass'] * waterborne_ratio * residential_ratio *
-                                         ratio_indoor * p('con_nonVola_indoor') / 1000)
+                                         ratio_indoor * p('Con_nonVola_indoor') / 1000)
     PFAS_predict['F3_vola_outdoor'] = (PFAS_predict['paint_mass'] * waterborne_ratio * residential_ratio *
-                                       ratio_outdoor * p('con_vola_outdoor') / 1000)
+                                       ratio_outdoor * p('Con_vola_outdoor') / 1000)
     PFAS_predict['F3_nonVola_outdoor'] = (PFAS_predict['paint_mass'] * waterborne_ratio * residential_ratio *
-                                          ratio_outdoor * p('con_nonVola_outdoor') / 1000)  # (tonnes)
+                                          ratio_outdoor * p('Con_nonVola_outdoor') / 1000)  # (tonnes)
     # --- Volatile emissions over lifetime (F6 indoor, F5 outdoor) via two-phase kernel ---
     f_fast, tau_fast = calibrate_fast_from_3h()
-    tau_slow_indoor = tau_from_half_life(tau_slow_indoor_half_life)
-    tau_slow_outdoor = tau_from_half_life(tau_slow_outdoor_half_life)
+    tau_slow_indoor = tau_from_half_life(p('HL_vola_indoor'))
+    tau_slow_outdoor = tau_from_half_life(p('HL_vola_outdoor'))
 
     r_in = yearly_bins(f_fast, tau_fast, tau_slow_indoor, H).ravel()
     r_out = yearly_bins(f_fast, tau_fast, tau_slow_outdoor, H).ravel()
@@ -418,61 +446,64 @@ def compute_pfas_predict(
     emit_tri_vola_indoor = pd.DataFrame(U_in, index=years, columns=years)
     emit_tri_vola_outdoor = pd.DataFrame(U_out, index=years, columns=years)
 
-    PFAS_predict = PFAS_predict.merge(emit_tri_vola_indoor.sum(axis=0).rename('F6_vola_indoor_new'),
+    PFAS_predict = PFAS_predict.merge(emit_tri_vola_indoor.sum(axis=0).rename('F6_vola_indoor'),
                                       left_on='year', right_index=True, how='left')
-    PFAS_predict = PFAS_predict.merge(emit_tri_vola_outdoor.sum(axis=0).rename('F5_vola_outdoor_new'),
+    PFAS_predict = PFAS_predict.merge(emit_tri_vola_outdoor.sum(axis=0).rename('F5_vola_outdoor'),
                                       left_on='year', right_index=True, how='left')
 
     # --- Nonvolatile losses during use (F6_nonVola_indoor, F5_nonVola_outdoor) ---
-    r_nonVola = p('omega') * (1 - p('omega')) ** np.arange(H)
-    R_nonVola = toeplitz(np.r_[r_nonVola[0], np.zeros(H - 1)], r_nonVola)
+    r_nonVola_indoor = p('Loss rate_nonVola_indoor') * (1 - p('Loss rate_nonVola_indoor')) ** np.arange(H)
+    R_nonVola_indoor = toeplitz(np.r_[r_nonVola_indoor[0], np.zeros(H - 1)], r_nonVola_indoor)
+
+    r_nonVola_outdoor = p('Loss rate_nonVola_outdoor') * (1 - p('Loss rate_nonVola_outdoor')) ** np.arange(H)
+    R_nonVola_outdoor = toeplitz(np.r_[r_nonVola_outdoor[0], np.zeros(H - 1)], r_nonVola_outdoor)
 
     inflow_nv_in = pf_idx.loc[years, 'F3_nonVola_indoor'].astype(float).to_numpy()
     inflow_nv_out = pf_idx.loc[years, 'F3_nonVola_outdoor'].astype(float).to_numpy()
 
-    U_nv_in = inflow_nv_in[:, None] * R_nonVola
-    U_nv_out = inflow_nv_out[:, None] * R_nonVola
+    U_nv_in = inflow_nv_in[:, None] * R_nonVola_indoor
+    U_nv_out = inflow_nv_out[:, None] * R_nonVola_outdoor
 
     emit_tri_nonVola_indoor = pd.DataFrame(U_nv_in, index=years, columns=years)
     emit_tri_nonVola_outdoor = pd.DataFrame(U_nv_out, index=years, columns=years)
 
-    PFAS_predict = PFAS_predict.merge(emit_tri_nonVola_indoor.sum(axis=0).rename('F6_nonVola_indoor_new'),
+    PFAS_predict = PFAS_predict.merge(emit_tri_nonVola_indoor.sum(axis=0).rename('F6_nonVola_indoor'),
                                       left_on='year', right_index=True, how='left')
-    PFAS_predict = PFAS_predict.merge(emit_tri_nonVola_outdoor.sum(axis=0).rename('F5_nonVola_outdoor_new'),
+    PFAS_predict = PFAS_predict.merge(emit_tri_nonVola_outdoor.sum(axis=0).rename('F5_nonVola_outdoor'),
                                       left_on='year', right_index=True, how='left')
 
     # --- Demolition paint areas & repaint masses (per year) ---
-    PFAS_predict['demo_ExteriorWall'] = PFAS_predict['demo_ResBuilding'] * exterior_ratio  # million m2
-    PFAS_predict['demo_InteriorWall'] = (2 * p('lumbar_interior') * height * PFAS_predict['demo_ResBuilding']
+    PFAS_predict['demo_ExteriorWall'] = PFAS_predict['demo_ResBuilding'] * p('Exterior wall density')  # million m2
+    PFAS_predict['demo_InteriorWall'] = (2 * p('Partition line density') * height * PFAS_predict['demo_ResBuilding']
                                          + PFAS_predict['demo_ExteriorWall'])  # million m2
 
     PFAS_predict['demo_InteriorWall_RepaintMass'] = (PFAS_predict['demo_InteriorWall'] * 2 *
-                                                     p('density') / paint_UsingDensity)  # million kg
+                                                     p('Paint density') / paint_UsingDensity)  # million kg
     PFAS_predict['demo_ExteriorWall_RepaintMass'] = (PFAS_predict['demo_ExteriorWall'] * 2 *
-                                                     p('density') / paint_UsingDensity)
+                                                     p('Paint density') / paint_UsingDensity)
 
     # --- Repaint residual matrices (vola/nonvola) for demolition flows (F7) ---
     resid_ratio_mat_vola_indoor = repaint_residual_matrix_vola(f_fast=f_fast,
                                                                tau_fast=tau_fast,
                                                                tau_slow=tau_slow_indoor,
-                                                               start=2000,
+                                                               start=1999,
                                                                end=end_year,
                                                                repaint_every=repaint_every_indoor,
                                                                first_col=start_year)
     resid_ratio_mat_vola_outdoor = repaint_residual_matrix_vola(f_fast=f_fast,
                                                                 tau_fast=tau_fast,
                                                                 tau_slow=tau_slow_outdoor,
-                                                                start=2000,
+                                                                start=1999,
                                                                 end=end_year,
                                                                 repaint_every=repaint_every_outdoor,
                                                                 first_col=start_year)
-    resid_ratio_mat_nonVola_indoor = repaint_residual_matrix_nonvola(omega=p('omega'),
-                                                                     start=2000,
+    resid_ratio_mat_nonVola_indoor = repaint_residual_matrix_nonvola(omega=p('Loss rate_nonVola_indoor'),
+                                                                     start=1999,
                                                                      end=end_year,
                                                                      repaint_every=repaint_every_indoor,
                                                                      first_col=start_year)
-    resid_ratio_mat_nonVola_outdoor = repaint_residual_matrix_nonvola(omega=p('omega'),
-                                                                      start=2000,
+    resid_ratio_mat_nonVola_outdoor = repaint_residual_matrix_nonvola(omega=p('Loss rate_nonVola_outdoor'),
+                                                                      start=1999,
                                                                       end=end_year,
                                                                       repaint_every=repaint_every_outdoor,
                                                                       first_col=start_year)
@@ -487,112 +518,16 @@ def compute_pfas_predict(
                                            reindex(years,fill_value=0.0))
     PFAS_predict['F7_vola_indoor'] = (PFAS_predict['demo_InteriorWall_RepaintMass'].astype(float)
                                       * demo_residual_total_vola_indoor.reindex(PFAS_predict['year']).to_numpy()
-                                      * (p('con_vola_indoor') / 1000.0))  # tonnes
+                                      * (p('Con_vola_indoor') / 1000.0))  # tonnes
     PFAS_predict['F7_vola_outdoor'] = (PFAS_predict['demo_ExteriorWall_RepaintMass'].astype(float)
                                        * demo_residual_total_vola_outdoor.reindex(PFAS_predict['year']).to_numpy()
-                                       * (p('con_vola_outdoor') / 1000.0))
+                                       * (p('Con_vola_outdoor') / 1000.0))
     PFAS_predict['F7_nonVola_indoor'] = (PFAS_predict['demo_InteriorWall_RepaintMass'].astype(float)
                                          * demo_residual_total_nonvola_indoor.reindex(PFAS_predict['year']).to_numpy()
-                                         * (p('con_nonVola_indoor') / 1000.0))
+                                         * (p('Con_nonVola_indoor') / 1000.0))
     PFAS_predict['F7_nonVola_outdoor'] = (PFAS_predict['demo_ExteriorWall_RepaintMass'].astype(float)
                                           * demo_residual_total_nonvola_outdoor.reindex(PFAS_predict['year']).to_numpy()
-                                          * (p('con_nonVola_outdoor') / 1000.0))
-
-    # --- Initial stocks in 2019 (scenario-sensitive because concentrations differ) ---
-    # Precompute 2019 residual matrices (don’t depend on concentrations)
-    resid_ratio_mat_vola_indoor_2019 = repaint_residual_matrix_vola(f_fast=f_fast,
-                                                                    tau_fast=tau_fast,
-                                                                    tau_slow=tau_slow_indoor,
-                                                                    start=2000,
-                                                                    end=2019,
-                                                                    repaint_every=repaint_every_indoor,
-                                                                    first_col=2019)
-    resid_ratio_mat_vola_outdoor_2019 = repaint_residual_matrix_vola(f_fast=f_fast,
-                                                                     tau_fast=tau_fast,
-                                                                     tau_slow=tau_slow_outdoor,
-                                                                     start=2000,
-                                                                     end=2019,
-                                                                     repaint_every=repaint_every_outdoor,
-                                                                     first_col=2019)
-    resid_ratio_mat_nonVola_indoor_2019 = repaint_residual_matrix_nonvola(omega=p('omega'),
-                                                                          start=2000,
-                                                                          end=2019,
-                                                                          repaint_every=repaint_every_indoor,
-                                                                          first_col=2019)
-    resid_ratio_mat_nonVola_outdoor_2019 = repaint_residual_matrix_nonvola(omega=p('omega'),
-                                                                           start=2000,
-                                                                           end=2019,
-                                                                           repaint_every=repaint_every_outdoor,
-                                                                           first_col=2019)
-    s0_vola_indoor_2019 = (((2 * p('lumbar_interior') * height * NationalStock_2019 + exterior_ratio * NationalStock_2019)
-                            * 2 * p('density') / paint_UsingDensity)
-                           * (p('con_vola_indoor') / 1000.0)
-                           * resid_ratio_mat_vola_indoor_2019.sum())
-    s0_nonVola_indoor_2019 = (((2 * p('lumbar_interior') * height * NationalStock_2019 + exterior_ratio * NationalStock_2019)
-                               * 2 * p('density') / paint_UsingDensity)
-                              * (p('con_nonVola_indoor') / 1000.0)
-                              * resid_ratio_mat_nonVola_indoor_2019.sum())
-    s0_vola_outdoor_2019 = (((exterior_ratio * NationalStock_2019)
-                             * 2 * p('density') / paint_UsingDensity)
-                            * (p('con_vola_outdoor') / 1000.0)
-                            * resid_ratio_mat_vola_outdoor_2019.sum())
-    s0_nonVola_outdoor_2019 = (((exterior_ratio * NationalStock_2019)
-                                * 2 * p('density') / paint_UsingDensity)
-                               * (p('con_nonVola_outdoor') / 1000.0)
-                               * resid_ratio_mat_nonVola_outdoor_2019.sum())
-
-    # calculate the PFAS emission from the initial PFAS stock from the repainting happening from 2000 to 2019,
-    # release in 2020 to 2060
-    emit_s0_vola_indoor_total_ratio = compute_s0_emissions_ratio(resid_ratio_mat_vola_indoor,
-                                                                 resid_ratio_mat_vola_indoor_2019)
-    emit_s0_nonVola_indoor_total_ratio = compute_s0_emissions_ratio(resid_ratio_mat_nonVola_indoor,
-                                                                    resid_ratio_mat_nonVola_indoor_2019)
-    emit_s0_vola_outdoor_total_ratio = compute_s0_emissions_ratio(resid_ratio_mat_vola_outdoor,
-                                                                  resid_ratio_mat_vola_outdoor_2019)
-    emit_s0_nonVola_outdoor_total_ratio = compute_s0_emissions_ratio(resid_ratio_mat_nonVola_outdoor,
-                                                                     resid_ratio_mat_nonVola_outdoor_2019)
-    emit_s0_vola_indoor_total_mass = (((2 * p('lumbar_interior') * height * NationalStock_2019 + exterior_ratio
-                                        * NationalStock_2019) * 2 * params_scenarios.loc['density', 'mean']
-                                       / paint_UsingDensity) * params_scenarios.loc['con_vola_indoor', 'mean'] / 1000
-                                      * emit_s0_vola_indoor_total_ratio)  # in the unit of tonnes
-    emit_s0_nonVola_indoor_total_mass = (((2 * p('lumbar_interior') * height * NationalStock_2019 + exterior_ratio
-                                           * NationalStock_2019) * 2 * params_scenarios.loc['density', 'mean']
-                                          / paint_UsingDensity) * params_scenarios.loc[
-                                             'con_nonVola_indoor', 'mean'] / 1000
-                                         * emit_s0_nonVola_indoor_total_ratio)  # in the unit of tonnes
-    emit_s0_vola_outdoor_total_mass = (
-                ((exterior_ratio * NationalStock_2019) * 2 * params_scenarios.loc['density', 'mean']
-                 / paint_UsingDensity) * params_scenarios.loc['con_vola_outdoor', 'mean'] / 1000
-                * emit_s0_vola_outdoor_total_ratio)  # in the unit of tonnes
-    emit_s0_nonVola_outdoor_total_mass = (((exterior_ratio * NationalStock_2019) * 2
-                                           * params_scenarios.loc['density', 'mean']
-                                           / paint_UsingDensity)
-                                          * params_scenarios.loc['con_nonVola_outdoor', 'mean'] / 1000
-                                          * emit_s0_nonVola_outdoor_total_ratio)  # in the unit of tonnes
-    PFAS_predict = PFAS_predict.merge(emit_s0_vola_indoor_total_mass.rename('F6_vola_indoor_old'),
-                                                left_on='year',
-                                                right_index=True,
-                                                how='left')
-    PFAS_predict = PFAS_predict.merge(emit_s0_nonVola_indoor_total_mass.rename('F6_nonVola_indoor_old'),
-                                                left_on='year',
-                                                right_index=True,
-                                                how='left')
-    PFAS_predict = PFAS_predict.merge(emit_s0_vola_outdoor_total_mass.rename('F5_vola_outdoor_old'),
-                                                left_on='year',
-                                                right_index=True,
-                                                how='left')
-    PFAS_predict = PFAS_predict.merge(emit_s0_nonVola_outdoor_total_mass.rename('F5_nonVola_outdoor_old'),
-                                                left_on='year',
-                                                right_index=True,
-                                                how='left')
-    PFAS_predict['F6_vola_indoor'] = (PFAS_predict['F6_vola_indoor_new']
-                                           + PFAS_predict['F6_vola_indoor_old'])
-    PFAS_predict['F6_nonVola_indoor'] = (PFAS_predict['F6_nonVola_indoor_new']
-                                              + PFAS_predict['F6_nonVola_indoor_old'])
-    PFAS_predict['F5_vola_outdoor'] = (PFAS_predict['F5_vola_outdoor_new']
-                                            + PFAS_predict['F5_vola_outdoor_old'])
-    PFAS_predict['F5_nonVola_outdoor'] = (PFAS_predict['F5_nonVola_outdoor_new']
-                                               + PFAS_predict['F5_nonVola_outdoor_old'])
+                                          * (p('Con_nonVola_outdoor') / 1000.0))
 
     # --- Time-ordered index ---
     PFAS_predict = PFAS_predict.sort_values('year').reset_index(drop=True)
@@ -601,36 +536,36 @@ def compute_pfas_predict(
     delta = (PFAS_predict['F3_vola_indoor'].astype(float)
              - PFAS_predict['F6_vola_indoor'].astype(float)
              - PFAS_predict['F7_vola_indoor'].astype(float)).fillna(0.0)
-    s0 = float(np.asarray(s0_vola_indoor_2019).ravel()[0])
-    PFAS_predict['s_vola_indoor'] = s0 + delta.cumsum()
+    # s0 = float(np.asarray(s0_vola_indoor_2019).ravel()[0])
+    PFAS_predict['s_vola_indoor'] = delta.cumsum()
 
     delta = (PFAS_predict['F3_nonVola_indoor'].astype(float)
              - PFAS_predict['F6_nonVola_indoor'].astype(float)
              - PFAS_predict['F7_nonVola_indoor'].astype(float)).fillna(0.0)
-    s0 = float(np.asarray(s0_nonVola_indoor_2019).ravel()[0])
-    PFAS_predict['s_nonVola_indoor'] = s0 + delta.cumsum()
+    # s0 = float(np.asarray(s0_nonVola_indoor_2019).ravel()[0])
+    PFAS_predict['s_nonVola_indoor'] = delta.cumsum()
 
     delta = (PFAS_predict['F3_vola_outdoor'].astype(float)
              - PFAS_predict['F5_vola_outdoor'].astype(float)
              - PFAS_predict['F7_vola_outdoor'].astype(float)).fillna(0.0)
-    s0 = float(np.asarray(s0_vola_outdoor_2019).ravel()[0])
-    PFAS_predict['s_vola_outdoor'] = s0 + delta.cumsum()
+    # s0 = float(np.asarray(s0_vola_outdoor_2019).ravel()[0])
+    PFAS_predict['s_vola_outdoor'] = delta.cumsum()
 
     delta = (PFAS_predict['F3_nonVola_outdoor'].astype(float)
              - PFAS_predict['F5_nonVola_outdoor'].astype(float)
              - PFAS_predict['F7_nonVola_outdoor'].astype(float)).fillna(0.0)
-    s0 = float(np.asarray(s0_nonVola_outdoor_2019).ravel()[0])
-    PFAS_predict['s_nonVola_outdoor'] = s0 + delta.cumsum()
+    # s0 = float(np.asarray(s0_nonVola_outdoor_2019).ravel()[0])
+    PFAS_predict['s_nonVola_outdoor'] = delta.cumsum()
 
     # --- Demolition → landfill accumulation & LF emissions (F8, F9, accu_*) ---
     # demo paint mass accumulation
     demo_residual_matrix_paintMass_indoor = demo_residual_matrix_PaintMass(r=0.6,
-                                                                           start=2000,
+                                                                           start=1999,
                                                                            end=end_year,
                                                                            repaint_every=repaint_every_indoor,
                                                                            first_col=start_year)
     demo_residual_matrix_paintMass_outdoor = demo_residual_matrix_PaintMass(r=0.6,
-                                                                            start=2000,
+                                                                            start=1999,
                                                                             end=end_year,
                                                                             repaint_every=repaint_every_outdoor,
                                                                             first_col=start_year)
@@ -652,10 +587,10 @@ def compute_pfas_predict(
 
     # landfill leachate & LFG
     PFAS_predict['F9_nonVola_leachate'] = ((PFAS_predict['demo_paintMass_accum'] *
-                                            p('leachate_con_nonVola')) * LG * 365 / SA) / 1e9  # tonnes
+                                            p('Leachate_con_nonVola')) * LG * 365 / SA) / 1e9  # tonnes
 
     PFAS_predict['F8_vola_LFG'] = ((PFAS_predict['demo_paintMass_accum'] * 1e6 * p('LFG_con_vola')) *
-                                   p('LFG_gen_rate') * 365 / (SA * 1000.0)) / 1e15  # tonnes
+                                   ((p('LFG_gen_rate')*405+p('LFG_gen_rate')*0.1*864)/1269) * 365 / (SA * 1000.0)) / 1e15  # tonnes
 
     # landfill stocks (tonnes)
     delta = (PFAS_predict['F7_vola_indoor'].astype(float)
@@ -668,6 +603,16 @@ def compute_pfas_predict(
              - PFAS_predict['F9_nonVola_leachate'].astype(float) / 1000.0).fillna(0.0)
     PFAS_predict['accu_LF_nonVola'] = delta.cumsum()
 
+    PFAS_predict["in_use_stock_total"] = PFAS_predict[["s_vola_indoor", "s_nonVola_indoor",
+                                                       "s_vola_outdoor", "s_nonVola_outdoor"]].sum(axis=1)
+
+    PFAS_predict["in_use_emission_total"] = PFAS_predict[["F6_vola_indoor", "F6_nonVola_indoor",
+                                                          "F5_vola_outdoor", "F5_nonVola_outdoor"]].sum(axis=1)
+
+    PFAS_predict["landfill_accu_total"] = PFAS_predict[["accu_LF_vola", "accu_LF_nonVola"]].sum(axis=1)
+
+    PFAS_predict["landfill_emission_total"] = PFAS_predict[["F9_nonVola_leachate", "F8_vola_LFG"]].sum(axis=1)
+
     return PFAS_predict
 
 
@@ -675,54 +620,15 @@ pfas_national_mean = compute_pfas_predict("mean")
 pfas_national_low = compute_pfas_predict("low")
 pfas_national_high = compute_pfas_predict("high")
 
-
-# Analysis and visualization
-# calculate the total in use stock, in the unit of tonnes
-# calculate the total in use emission, in the unit of tonnes
-# calculate the total landfill accumulation, in the unit of tonnes
-
-
-def add_totals(df):
-    df["in_use_stock_total"] = df[[
-        "s_vola_indoor", "s_nonVola_indoor",
-        "s_vola_outdoor", "s_nonVola_outdoor"
-    ]].sum(axis=1)
-
-    df["in_use_emission_total"] = df[[
-        "F6_vola_indoor", "F6_nonVola_indoor",
-        "F5_vola_outdoor", "F5_nonVola_outdoor"
-    ]].sum(axis=1)
-
-    df["landfill_accu_total"] = df[[
-        "accu_LF_vola", "accu_LF_nonVola"
-    ]].sum(axis=1)
-
-    df["landfill_emission_total"] = df[[
-        "F9_nonVola_leachate", "F8_vola_LFG"
-    ]].sum(axis=1)
-
-    return df
-
-
-pfas_national_mean = add_totals(pfas_national_mean)
-pfas_national_high = add_totals(pfas_national_high)
-pfas_national_low = add_totals(pfas_national_low)
-
-# pfas_national_mean.to_csv("PFAS_predict_national_mean.csv", index=False)
-# pfas_national_low.to_csv("PFAS_predict_national_ low.csv", index=False)
-# pfas_national_high.to_csv("PFAS_predict_national_high.csv", index=False)
+pfas_national_mean.to_csv("PFAS_predict_national_mean.csv", index=False)
+pfas_national_low.to_csv("PFAS_predict_national_ low.csv", index=False)
+pfas_national_high.to_csv("PFAS_predict_national_high.csv", index=False)
 
 # per capita mean, 'pc' means per capita
-# pfas_national_mean['in_use_stock_pc'] = (pfas_national_mean.set_index('year')['in_use_stock_total'].
-#                                          div(National_pop['national_pop']).reset_index(drop=True))*1000
-# pfas_national_mean['in_use_emission_pc'] = (pfas_national_mean.set_index('year')['in_use_emission_total'].
-#                                             div(National_pop['national_pop']).reset_index(drop=True))*1000000
-# National_StockSum['stock_pc'] = National_StockSum['stock_million_m2']*1000000/National_pop['national_pop']
-#
-# plt.figure(figsize=(8, 5))
-# plt.plot(National_StockSum.index, National_StockSum['stock_pc'], marker='o', lw=2, color='navy')
-# plt.tight_layout()
-# plt.show()
+pfas_national_mean['in_use_stock_pc'] = (pfas_national_mean.set_index('year')['in_use_stock_total'].
+                                         div(National_pop['national_pop']).reset_index(drop=True))*1000
+pfas_national_mean['in_use_emission_pc'] = (pfas_national_mean.set_index('year')['in_use_emission_total'].
+                                            div(National_pop['national_pop']).reset_index(drop=True))*1000000
 
 # visualization of national estimation under high, central, and low scenario
 sns.set(style='white', font_scale=1.8, font='Arial')
@@ -744,7 +650,7 @@ for i, ax in enumerate(axs.flat):
             linewidth=2.5, label='Central')
     ax.plot(pfas_national_high['year'], pfas_national_high[f'{columns[i]}'], color=colors[2], linestyle='-',
             linewidth=3, label='High')
-    ax.set_xlim(2020, 2060)
+    ax.set_xlim(2000, 2060)
     ax.set_ylim(bottom=0)
     # ax.set_xlabel('Year')
     ax.set_ylabel(y_titles[i], fontsize=18)
@@ -756,13 +662,14 @@ for i, ax in enumerate(axs.flat):
     ax.yaxis.set_major_formatter(fmt)
     ax.yaxis.set_major_locator(MaxNLocator(nbins=5))
     ax.yaxis.get_offset_text().set_fontsize(14)
-    ax.set_xticks(np.arange(2020, 2061, 10))
+    ax.set_xticks(np.arange(2000, 2061, 10))
+    ax.tick_params(axis='x', labelrotation=90)
     ax.set_box_aspect(0.75)
 handles, labels_ = axs[0].get_legend_handles_labels()
-fig.legend(handles, labels_, loc = 'lower center', ncol = 3, frameon=False, fontsize=16)
+fig.legend(handles, labels_, loc = 'lower center', bbox_to_anchor=(0.5, -0.03), ncol = 3, frameon=False, fontsize=16)
 # plt.tight_layout(rect=[0, 0.08, 1, 1])
 # plt.tight_layout()
-# plt.savefig('National estimation_total.png',bbox_inches='tight')
+plt.savefig('National estimation_total.png', bbox_inches='tight')
 plt.show()
 
 # stacked subplot of pfas_national_mean
@@ -805,8 +712,7 @@ for i, ax in enumerate(axs):
     total = pfas_national_mean[stack_cols].sum(axis=1)
     ax.plot(years, total, color='k', lw=1.3, alpha=0.9)
     # Axes format
-    ax.set_xlim(2020, 2060)
-    ax.set_xticks([2020, 2030, 2040, 2050, 2060])
+    ax.set_xlim(2000, 2060)
     ax.set_ylim(bottom=0)
     ax.set_ylabel(plots[i]["ylabel"], fontsize=18)
     ax.margins(x=0)
@@ -817,7 +723,8 @@ for i, ax in enumerate(axs):
     ax.yaxis.set_major_formatter(fmt)
     ax.yaxis.set_major_locator(MaxNLocator(nbins=5))
     ax.yaxis.get_offset_text().set_fontsize(14)
-    ax.set_xticks(np.arange(2020, 2061, 10))
+    ax.set_xticks(np.arange(2000, 2061, 10))
+    ax.tick_params(axis='x', labelrotation=90)
     ax.set_box_aspect(0.75)
     # Panel label
     ax.text(0.02, 0.98, labels[i], transform=ax.transAxes, va='top', ha='left',
@@ -833,7 +740,7 @@ handles_gh, labels_gh = axs[2].get_legend_handles_labels()
 #            labels_gh,
 #            loc='upper center', bbox_to_anchor=(0.75, 0.1),
 #            ncol=len(labels_gh), frameon=False, fontsize=16)
-plt.savefig('Stacked_national_total_mean_2.png', bbox_inches='tight')
+plt.savefig('Stacked_national_total_mean.png', bbox_inches='tight')
 plt.show()
 
 # stacked plot for national estimation high scenario
@@ -850,8 +757,7 @@ for i, ax in enumerate(axs):
     total = pfas_national_high[stack_cols].sum(axis=1)
     ax.plot(years, total, color='k', lw=1.3, alpha=0.9)
     # Axes format
-    ax.set_xlim(2020, 2060)
-    ax.set_xticks([2020, 2030, 2040, 2050, 2060])
+    ax.set_xlim(2000, 2060)
     ax.set_ylim(bottom=0)
     ax.set_ylabel(plots[i]["ylabel"], fontsize=18)
     ax.margins(x=0)
@@ -862,14 +768,12 @@ for i, ax in enumerate(axs):
     ax.yaxis.set_major_formatter(fmt)
     ax.yaxis.set_major_locator(MaxNLocator(nbins=5))
     ax.yaxis.get_offset_text().set_fontsize(14)
-    ax.set_xticks(np.arange(2020, 2061, 10))
+    ax.set_xticks(np.arange(2000, 2061, 10))
+    ax.tick_params(axis='x', labelrotation=90)
     ax.set_box_aspect(0.75)
     # Panel label
     ax.text(0.02, 0.98, labels[i], transform=ax.transAxes, va='top', ha='left',
             fontsize=28, fontweight='bold')
-# Shared legend outside
-# handles, leg_labels = axs[0].get_legend_handles_labels()
-# fig.legend(handles, leg_labels, loc='lower center', ncol=4, frameon=False)
 plt.savefig('Stacked_national_total_high.png', bbox_inches='tight')
 plt.show()
 
@@ -887,8 +791,7 @@ for i, ax in enumerate(axs):
     total = pfas_national_low[stack_cols].sum(axis=1)
     ax.plot(years, total, color='k', lw=1.3, alpha=0.9)
     # Axes format
-    ax.set_xlim(2020, 2060)
-    ax.set_xticks([2020, 2030, 2040, 2050, 2060])
+    ax.set_xlim(2000, 2060)
     ax.set_ylim(bottom=0)
     ax.set_ylabel(plots[i]["ylabel"], fontsize=18)
     ax.margins(x=0)
@@ -899,7 +802,8 @@ for i, ax in enumerate(axs):
     ax.yaxis.set_major_formatter(fmt)
     ax.yaxis.set_major_locator(MaxNLocator(nbins=5))
     ax.yaxis.get_offset_text().set_fontsize(14)
-    ax.set_xticks(np.arange(2020, 2061, 10))
+    ax.set_xticks(np.arange(2000, 2061, 10))
+    ax.tick_params(axis='x', labelrotation=90)
     ax.set_box_aspect(0.75)
     # Panel label
     ax.text(0.02, 0.98, labels[i], transform=ax.transAxes, va='top', ha='left',
@@ -907,11 +811,11 @@ for i, ax in enumerate(axs):
 # Shared legend outside
 # handles, leg_labels = axs[0].get_legend_handles_labels()
 # fig.legend(handles, leg_labels, loc='lower center', ncol=4, frameon=False)
-# plt.savefig('Stacked_national_total_low.png', bbox_inches='tight')
+plt.savefig('Stacked_national_total_low.png', bbox_inches='tight')
 plt.show()
 
 # Conduct the sensitivity analysis, set the mean as the baseline, +/-10% of each parameters in params_scenarios
-out_dir = Path('sensitivity_2')
+out_dir = Path('sensitivity')
 out_dir.mkdir(parents=True, exist_ok=True)
 
 YEAR = "year"
@@ -940,7 +844,7 @@ for tag, factor in (("positive", 1.10), ("negative", 0.90)):
             params_scenarios.at[idx, 'mean'] = orig
 
 # visualization of sensitivity analysis
-path = 'C:/Users/mchen48/Box/01 Research/PFASs/PFAS in paints/Data collection/Data processing_pfas in paint/sensitivity'
+path = 'C:/Users/mchen48/Box/01 Research/PFASs/PFAS in paints/Data collection/Data processing_pfas in paint_4/sensitivity'
 change = ['positive', 'negative']
 sens_target = ['in_use_stock_total',
                'in_use_emission_total',
@@ -970,8 +874,8 @@ gs = gridspec.GridSpec(2,2,figure=fig)
 axes = [fig.add_subplot(gs[i]) for i in range(4)]
 for i in range(4):
     ax = axes[i]
-    Increase_impact = [sens_df_2020.iloc[i, j] for j in range(0, 21, 2)]
-    Decrease_impact = [sens_df_2020.iloc[i, j] for j in range(1, 22, 2)]
+    Increase_impact = [sens_df_2020.iloc[i, j] for j in range(0, 27, 2)]
+    Decrease_impact = [sens_df_2020.iloc[i, j] for j in range(1, 28, 2)]
     df = pd.DataFrame({
         'variable': params_scenarios.index,
         'Increase': Increase_impact,
@@ -1009,7 +913,7 @@ fig.legend(handles=handles, loc='lower center', ncol=2, fontsize=16, frameon=Fal
            bbox_to_anchor=(0.5, -0.02))
 plt.subplots_adjust(hspace=0.3)
 plt.tight_layout()
-plt.savefig('Sensitivity analysis.png', format = 'png', dpi = 300)
+plt.savefig('Sensitivity analysis_2020.png', format = 'png', dpi = 300)
 plt.show()
 
 
@@ -1020,8 +924,8 @@ gs = gridspec.GridSpec(2,2,figure=fig)
 axes = [fig.add_subplot(gs[i]) for i in range(4)]
 for i in range(4):
     ax = axes[i]
-    Increase_impact = [sens_df_2060.iloc[i, j] for j in range(0, 21, 2)]
-    Decrease_impact = [sens_df_2060.iloc[i, j] for j in range(1, 22, 2)]
+    Increase_impact = [sens_df_2060.iloc[i, j] for j in range(0, 27, 2)]
+    Decrease_impact = [sens_df_2060.iloc[i, j] for j in range(1, 28, 2)]
     df = pd.DataFrame({
         'variable': params_scenarios.index,
         'Increase': Increase_impact,
@@ -1062,6 +966,401 @@ plt.tight_layout()
 plt.savefig('Sensitivity analysis_2060.png', format = 'png', dpi = 300)
 plt.show()
 
+
+# conduct Monte Carlo analysis to quantify the uncertainty analysis
+uniform_params = {
+    'Loss rate_nonVola_indoor',
+    'Loss rate_nonVola_outdoor',
+    'HL_vola_indoor',
+    'HL_vola_outdoor'
+}
+
+output_cols = [
+    'in_use_stock_total',
+    'in_use_emission_total',
+    'landfill_accu_total',
+    'landfill_emission_total'
+]
+
+
+def sample_uniform(low, high, rng):
+    return rng.uniform(low, high)
+
+
+def sample_lognormal(low, mean, high, rng):
+    z975 = norm.ppf(0.975)
+    mu = np.log(mean)
+    sigma = (np.log(high) - np.log(low))/(2*z975)
+    return rng.lognormal(mu, sigma)
+
+
+def draw_parameters(params_scenarios, uniform_params, rng):
+    params = {}
+    for p in params_scenarios.index:
+        low = float(params_scenarios.loc[p, 'low'])
+        mean = float(params_scenarios.loc[p, 'mean'])
+        high = float(params_scenarios.loc[p, 'high'])
+        lo = min(low, high)
+        hi = max(low, high)
+        if p in uniform_params:
+            params[p] = sample_uniform(lo, hi, rng)
+        else:
+            params[p] = sample_lognormal(lo, mean, hi, rng)
+    return params
+
+
+def run_monte_carlo_timeseries(
+        n_runs,
+        params_scenarios,
+        uniform_params,
+        seed=42
+):
+    rng = np.random.default_rng(seed)
+    results = []
+    for i in range(n_runs):
+        params = draw_parameters(params_scenarios, uniform_params, rng)
+        df = compute_pfas_predict(params=params)
+        df_out = df[['year'] + output_cols].copy()
+        df_out['iteration'] = i
+        results.append(df_out)
+        if (i+1)%100 == 0:
+            print(f'{i+1} runs finished')
+    mc_results = pd.concat(results, ignore_index=True)
+    return mc_results
+
+
+mc_results = run_monte_carlo_timeseries(
+    n_runs=10000,
+    params_scenarios=params_scenarios,
+    uniform_params=uniform_params
+)
+
+summary = mc_results.groupby("year")[output_cols].quantile([0.025, 0.5, 0.975]).unstack()
+q_map = {
+    0.025: "p2_5",
+    0.5: "median",
+    0.975: "p97_5"
+}
+summary.columns = [f"{col[0]}_{q_map[col[1]]}" for col in summary.columns]
+summary = summary.reset_index()
+
+plt.rcParams["font.family"] = "Arial"
+
+fig, axes = plt.subplots(2, 2, figsize=(12, 8), sharex=True)
+axes = axes.flatten()
+
+plot_info = [
+    ("in_use_stock_total", "tonnes", "(a) In-use stock"),
+    ("in_use_emission_total", "tonnes/year", "(b) In-use emission"),
+    ("landfill_accu_total", "tonnes", "(c) Landfill accumulation"),
+    ("landfill_emission_total", "tonnes/year", "(d) Landfill emission"),
+]
+
+for ax, (var, ylabel, title) in zip(axes, plot_info):
+    x = summary["year"]
+    y_med = summary[f"{var}_median"]
+    y_low = summary[f"{var}_p2_5"]
+    y_high = summary[f"{var}_p97_5"]
+
+    ax.plot(x, y_med, linewidth=1.8, label="Median")
+    ax.fill_between(x, y_low, y_high, alpha=0.3, label="95% uncertainty interval")
+
+    ax.set_title(title, fontsize=14)
+    ax.set_ylabel(ylabel, fontsize=12)
+    ax.tick_params(axis="both", labelsize=12)
+    ax.grid(True, alpha=0.3)
+
+# X-axis labels only for bottom row
+axes[2].set_xlabel("Year", fontsize=12)
+axes[3].set_xlabel("Year", fontsize=12)
+
+# Show legend only once
+axes[0].legend(frameon=False, fontsize=12)
+
+plt.tight_layout()
+plt.savefig('Monte Carlo Analysis.png', dpi=600, bbox_inches="tight")
+plt.show()
+
+
+# sobol index
+# =========================================================
+# 1. User settings
+# =========================================================
+years_to_analyze = [2020, 2040, 2060]   # change freely, e.g. [2020,2030,2040,2050,2060]
+N = 512                                 # Sobol base sample size
+n_jobs = -1                             # use all CPU cores
+top_n_evolution = 5                     # how many top parameters to show in evolution plot
+
+# Plot settings
+plt.rcParams["font.family"] = "Arial"
+
+
+# =========================================================
+# 2. Define Sobol problem from params_scenarios
+# =========================================================
+param_names = params_scenarios.index.tolist()
+
+problem = {
+    "num_vars": len(param_names),
+    "names": param_names,
+    "bounds": [
+        [
+            min(float(params_scenarios.loc[p, "low"]),
+                float(params_scenarios.loc[p, "high"])),
+            max(float(params_scenarios.loc[p, "low"]),
+                float(params_scenarios.loc[p, "high"]))
+        ]
+        for p in param_names
+    ]
+}
+
+# =========================================================
+# 3. Generate Sobol samples
+# =========================================================
+param_values = sobol.sample(problem, N, calc_second_order=False)
+
+
+# =========================================================
+# 4. Run one model evaluation and extract outputs at all years
+# =========================================================
+def run_model_extract_years(X):
+    params = dict(zip(param_names, X))
+
+    df = compute_pfas_predict(params=params)
+
+    outputs = {}
+
+    for yr in years_to_analyze:
+        row = df.loc[df["year"] == yr].iloc[0]
+
+        outputs[(yr, "stock")] = row["in_use_stock_total"]
+        outputs[(yr, "emission")] = row["in_use_emission_total"]
+        outputs[(yr, "landfill_accu")] = row["landfill_accu_total"]
+        outputs[(yr, "landfill_emission")] = row["landfill_emission_total"]
+
+    return outputs
+
+
+# =========================================================
+# 5. Run all Sobol model evaluations in parallel
+# =========================================================
+results_list = Parallel(n_jobs=n_jobs, verbose=10)(
+    delayed(run_model_extract_years)(X) for X in param_values
+)
+
+# =========================================================
+# 6. Convert outputs to arrays for Sobol analysis
+# =========================================================
+Y = {}
+
+for yr in years_to_analyze:
+    for out in ["stock", "emission", "landfill_accu", "landfill_emission"]:
+        Y[(yr, out)] = np.array([r[(yr, out)] for r in results_list])
+
+
+# =========================================================
+# 7. Sobol analysis for all years and outputs
+# =========================================================
+sobol_tables = {}
+
+for yr in years_to_analyze:
+    for out in ["stock", "emission", "landfill_accu", "landfill_emission"]:
+
+        Si = sobol_analyze.analyze(
+            problem,
+            Y[(yr, out)],
+            calc_second_order=False,
+            print_to_console=False
+        )
+
+        df = pd.DataFrame({
+            "parameter": param_names,
+            "S1": Si["S1"],
+            "S1_conf": Si["S1_conf"],
+            "ST": Si["ST"],
+            "ST_conf": Si["ST_conf"]
+        })
+
+        df["year"] = yr
+        df["output"] = out
+
+        sobol_tables[(yr, out)] = df.sort_values("ST", ascending=False).reset_index(drop=True)
+
+
+# =========================================================
+# 8. Combine and save all Sobol results
+# =========================================================
+sobol_all = pd.concat(sobol_tables.values(), ignore_index=True)
+
+sobol_all.to_csv("sobol_results_all_years.csv", index=False)
+print("Saved: sobol_results_all_years.csv")
+
+
+# =========================================================
+# 9. Print example result tables
+# =========================================================
+for yr in years_to_analyze:
+    print(f"\n===== Sobol ranking for landfill emission ({yr}) =====")
+    print(sobol_tables[(yr, "landfill_emission")][["parameter", "S1", "ST"]].head(10))
+
+
+# =========================================================
+# 10. Plot classic 2x2 Sobol bar chart for each year
+# =========================================================
+output_order = ["stock", "emission", "landfill_accu", "landfill_emission"]
+
+output_titles = {
+    "stock": "(a) In-use stock",
+    "emission": "(b) In-use emission",
+    "landfill_accu": "(c) Landfill accumulation",
+    "landfill_emission": "(d) Landfill emission"
+}
+
+for yr in years_to_analyze:
+    fig, axes = plt.subplots(2, 2, figsize=(12, 9))
+    axes = axes.flatten()
+
+    for ax, out in zip(axes, output_order):
+        df_plot = sobol_tables[(yr, out)].sort_values("ST", ascending=True)
+
+        ax.barh(df_plot["parameter"], df_plot["ST"])
+        ax.set_title(f"{output_titles[out]} ({yr})", fontsize=12)
+        ax.set_xlabel("Total Sobol index (ST)", fontsize=11)
+        ax.tick_params(axis="both", labelsize=9)
+        ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(f"sobol_2x2_{yr}.png", dpi=600, bbox_inches="tight")
+    plt.show()
+
+print("Saved yearly 2x2 Sobol figures.")
+
+
+# =========================================================
+# 11. Plot 2x4 comparison for first and last selected years
+#     top row = first selected year
+#     bottom row = last selected year
+# =========================================================
+if len(years_to_analyze) >= 2:
+    year_1 = years_to_analyze[0]
+    year_2 = years_to_analyze[-1]
+
+    fig, axes = plt.subplots(2, 4, figsize=(20, 10), sharex=False, sharey=False)
+
+    panel_labels = {
+        (0, 0): "(a)",
+        (0, 1): "(b)",
+        (0, 2): "(c)",
+        (0, 3): "(d)",
+        (1, 0): "(e)",
+        (1, 1): "(f)",
+        (1, 2): "(g)",
+        (1, 3): "(h)",
+    }
+
+    year_order = [year_1, year_2]
+
+    for r, yr in enumerate(year_order):
+        for c, out in enumerate(output_order):
+            ax = axes[r, c]
+            df_plot = sobol_tables[(yr, out)].sort_values("ST", ascending=True)
+
+            ax.barh(df_plot["parameter"], df_plot["ST"])
+            ax.set_title(f"{panel_labels[(r, c)]} {output_titles[out][4:]} ({yr})", fontsize=12)
+            ax.set_xlabel("Total Sobol index (ST)", fontsize=10)
+            ax.tick_params(axis="both", labelsize=9)
+            ax.grid(True, alpha=0.3)
+
+            if c == 0:
+                ax.set_ylabel("Parameter", fontsize=10)
+
+    plt.tight_layout()
+    plt.savefig(f"sobol_2x4_compare_{year_1}_{year_2}.png", dpi=600, bbox_inches="tight")
+    plt.show()
+
+    print(f"Saved: sobol_2x4_compare_{year_1}_{year_2}.png")
+
+
+# =========================================================
+# 12. Parameter importance evolution plot (2020–2060 or selected years)
+#     For each output, show the top N parameters based on the
+#     maximum ST across selected years
+# =========================================================
+fig, axes = plt.subplots(2, 2, figsize=(12, 9))
+axes = axes.flatten()
+
+evolution_titles = {
+    "stock": "(a) In-use stock",
+    "emission": "(b) In-use emission",
+    "landfill_accu": "(c) Landfill accumulation",
+    "landfill_emission": "(d) Landfill emission"
+}
+
+# optional: set legend location for each subplot
+legend_locs = {
+    "stock": "upper right",
+    "emission": "upper right",
+    "landfill_accu": "upper right",
+    "landfill_emission": "upper right"
+}
+
+for ax, out in zip(axes, output_order):
+
+    # Build ST table: rows = parameter, cols = year
+    st_table = pd.DataFrame(index=param_names, columns=years_to_analyze, dtype=float)
+
+    for yr in years_to_analyze:
+        df_plot = sobol_tables[(yr, out)].set_index("parameter")
+        st_table[yr] = df_plot["ST"].reindex(param_names)
+
+    # pick top parameters based on max ST across years
+    st_table["max_ST"] = st_table.max(axis=1)
+    top_params = st_table["max_ST"].sort_values(ascending=False).head(top_n_evolution).index.tolist()
+    st_table = st_table.drop(columns="max_ST")
+
+    for p in top_params:
+        ax.plot(
+            years_to_analyze,
+            st_table.loc[p, years_to_analyze].values,
+            marker="o",
+            linewidth=1.8,
+            label=p
+        )
+
+    ax.set_title(evolution_titles[out], fontsize=14)
+    ax.set_xlabel("Year", fontsize=12)
+    ax.set_ylabel("Total Sobol index (ST)", fontsize=14)
+    ax.tick_params(axis="both", labelsize=12)
+    ax.grid(True, alpha=0.3)
+
+    # add legend to each subplot
+    ax.legend(
+        frameon=False,
+        fontsize=10,
+        loc=legend_locs[out]
+    )
+
+plt.tight_layout()
+plt.savefig("sobol_parameter_importance_evolution.png", dpi=300, bbox_inches="tight")
+plt.show()
+
+print("Saved: sobol_parameter_importance_evolution.png")
+
+
+# =========================================================
+# 13. Optional: save ST evolution tables for each output
+# =========================================================
+for out in output_order:
+    st_table = pd.DataFrame(index=param_names, columns=years_to_analyze, dtype=float)
+
+    for yr in years_to_analyze:
+        df_plot = sobol_tables[(yr, out)].set_index("parameter")
+        st_table[yr] = df_plot["ST"].reindex(param_names)
+
+    st_table.to_csv(f"sobol_ST_evolution_{out}.csv")
+    print(f"Saved: sobol_ST_evolution_{out}.csv")
+
+
 # County level estimation, use the same model and county level residential building stock, demolition data,
 # population and county level precipitation data, only use the mean scenario values of the parameters
 out_dir = Path('county_PFAS')
@@ -1070,7 +1369,7 @@ county_pop_2019 = pd.read_csv('C:/Users/mchen48/Box/01 Research/PFASs/PFASs_in_C
                               'United_States_Pop_data/Contiguous US population 1990-2060.csv')
 keep = county_pop_2019.columns[:3]
 new_df = county_pop_2019[keep].reindex(columns=county_pop_2019.columns)
-new_df = new_df.drop(columns=[str(y) for y in range(1990, 2020)], errors='ignore')
+new_df = new_df.drop(columns=[str(y) for y in range(1990, 2000)], errors='ignore')
 in_use_stock_county = new_df.copy()
 in_use_emission_county = new_df.copy()
 landfill_accu_county = new_df.copy()
@@ -1078,7 +1377,7 @@ landfill_emission_county = new_df.copy()
 landfill_PaintMass_accu_county = new_df.copy()
 # pick the year columns in the target (strings or ints)
 year_cols = [c for c in in_use_stock_county.columns
-             if str(c).isdigit() and 2020 <= int(c) <= 2060]
+             if str(c).isdigit() and 2000 <= int(c) <= 2060]
 for i in range(len(pop_county_conti)):
     geoid = pop_county_conti.loc[i, 'GeoID']
     National_pop = pop_county_conti.iloc[i, 1:].rename('national_pop').to_frame()
@@ -1092,8 +1391,8 @@ for i in range(len(pop_county_conti)):
             if 'year' in d.columns:
                 d.set_index('year', inplace=True)
             d.index = d.index.astype(int)
-    pfas_county_mean = compute_pfas_predict("mean", pop_2019=pop_2019)
-    pfas_county_mean = add_totals(pfas_county_mean)
+    pfas_county_mean = compute_pfas_predict("mean")
+    # pfas_county_mean = add_totals(pfas_county_mean)
     s = (pfas_county_mean
          .set_index('year')['in_use_stock_total']
          .astype(float))
@@ -1115,17 +1414,17 @@ for i in range(len(pop_county_conti)):
          .astype(float))
     landfill_PaintMass_accu_county.loc[i, year_cols] = s.to_numpy()
 
-# in_use_stock_county.to_csv('in_use_stock_county.csv', index=False)
-# in_use_emission_county.to_csv('in_use_emission_county.csv', index=False)
-# landfill_accu_county.to_csv('landfill_accu_county.csv', index=False)
-# landfill_emission_county.to_csv('landfill_emission_county.csv', index=False)
-# landfill_PaintMass_accu_county.to_csv('landfill_PaintMass_accu_county.csv', index=False)  # in the unit of million kg
+in_use_stock_county.to_csv('in_use_stock_county.csv', index=False)
+in_use_emission_county.to_csv('in_use_emission_county.csv', index=False)
+landfill_accu_county.to_csv('landfill_accu_county.csv', index=False)
+landfill_emission_county.to_csv('landfill_emission_county.csv', index=False)
+landfill_PaintMass_accu_county.to_csv('landfill_PaintMass_accu_county.csv', index=False)  # in the unit of million kg
 # Check national
-# check_national = pd.DataFrame(landfill_PaintMass_accu_county.iloc[:, 3:].sum(), columns=['sum'])
+check_national = pd.DataFrame(landfill_PaintMass_accu_county.iloc[:, 3:].sum(), columns=['sum'])
 
 # National distribution visualization
 # 1 read a US counties boundary file
-path = 'C:/Users/mchen48/Box/01 Research/PFASs/PFAS in paints/Data collection/Data processing_pfas in paint_2'
+path = 'C:/Users/mchen48/Box/01 Research/PFASs/PFAS in paints/Data collection/Data processing_pfas in paint_4'
 in_use_stock_county = pd.read_csv(f'{path}/in_use_stock_county.csv')
 # in_use_stock_county.iloc[:, 3:] = in_use_stock_county.iloc[:, 3:].where(in_use_stock_county.iloc[:, 3:] >= 0, 0)
 num = in_use_stock_county.iloc[:, 3:].apply(pd.to_numeric, errors="coerce")
@@ -1353,7 +1652,7 @@ cd_landfills_dedup = df.drop_duplicates(subset=['Latitude','Longitude'], keep='f
 print(f"Removed {before - len(cd_landfills_dedup)} exact-duplicate rows.")
 # (optional) overwrite original
 cd_landfills = cd_landfills_dedup
-# cd_landfills.to_csv('cd_landfills_filtered.csv', index=False)
+cd_landfills.to_csv('cd_landfills_filtered.csv', index=False)
 
 
 df = cd_landfills.copy()
@@ -1425,58 +1724,44 @@ per_cap_landfill_accu_PaintMass_county.insert(3,'State', df_County_Info_conti['S
 
 path = ('C:/Users/mchen48/Box/01 Research/PFASs/PFASs_in_Carpet/00 PFAS_US_carpet/PFAS_allocation_census tracts/Peter/'
         'Census tracts population')
-ct_template = pd.read_csv(f'{path}/CT_Population_2020.csv')
-ct_template = ct_template[~ct_template['State'].isin(['Alaska', 'Hawaii'])]
-ct_template = ct_template.drop(columns=['2020'])
 
-pop_ct_conti = ct_template.copy()
-for year in range(2020, 2061):
+out_dir = Path('ct_PFAS')
+out_dir.mkdir(parents=True, exist_ok=True)
+for i, year in enumerate(range(2000, 2061)):
     df = pd.read_csv(f'{path}/CT_Population_{year}.csv')
     df = df[~df['State'].isin(['Alaska', 'Hawaii'])]
-    pop_ct_conti[f"{year}"] = (pop_ct_conti["GEO_ID"].map(df.set_index("GEO_ID")[f'{year}']))
-National_pop_ct = pd.DataFrame(pop_ct_conti.iloc[:, 4:].sum(), columns=['sum'])
-National_pop_county = pd.DataFrame(pop_county_conti.iloc[:, 1:].sum(), columns=['sum'])
-
-landfill_accu_PFAS_ct = ct_template.copy()
-for i, year in enumerate(range(2020, 2061)):
-    df = pd.read_csv(f'{path}/CT_Population_{year}.csv')
     df = df.rename(columns={f'{year}': f'pop_{year}'})
-    df = df[~df['State'].isin(['Alaska', 'Hawaii'])]
     df = pd.merge(df, per_cap_landfill_accu_PFAS_county[['County', 'State', f'{year}']], how='left',
                   left_on=['County', 'State'], right_on=['County', 'State'])
     df['landfill_accu_PFAS'] = df[f'pop_{year}'] * df[f'{year}']
     scale = df['landfill_accu_PFAS'].sum()/1000000/pfas_national_mean.loc[i, 'landfill_accu_total']
     df['landfill_accu_PFAS'] = df['landfill_accu_PFAS']/scale
-    # in the unit of g
-    landfill_accu_PFAS_ct[f"{year}"] = landfill_accu_PFAS_ct["GEO_ID"].map(df.set_index("GEO_ID")["landfill_accu_PFAS"])
-check = pd.DataFrame(landfill_accu_PFAS_ct.iloc[:, 4:].sum()/1000000, columns=['sum'])
-# landfill_accu_PFAS_ct.to_csv('landfill_accu_PFAS_ct.csv', index=False)
+    df.to_csv(out_dir/f'landfill_accu_PFAS_{year}.csv', index=False)
 
-landfill_accu_PaintMass_ct = ct_template.copy()
-for i, year in enumerate(range(2020, 2061)):
+
+out_dir = Path('ct_PaintMass')
+out_dir.mkdir(parents=True, exist_ok=True)
+for i, year in enumerate(range(2000, 2061)):
     df = pd.read_csv(f'{path}/CT_Population_{year}.csv')
-    df = df.rename(columns={f'{year}': f'pop_{year}'})
     df = df[~df['State'].isin(['Alaska', 'Hawaii'])]
+    df = df.rename(columns={f'{year}': f'pop_{year}'})
     df = pd.merge(df, per_cap_landfill_accu_PaintMass_county[['County', 'State', f'{year}']], how='left',
                   left_on=['County', 'State'], right_on=['County', 'State'])
     df['landfill_accu_PaintMass'] = df[f'pop_{year}'] * df[f'{year}']
     scale = df['landfill_accu_PaintMass'].sum()/1000000/pfas_national_mean.loc[i, 'demo_paintMass_accum']
     df['landfill_accu_PaintMass'] = df['landfill_accu_PaintMass'] / scale
-    # in the unit of g
-    landfill_accu_PaintMass_ct[f"{year}"] = (landfill_accu_PaintMass_ct["GEO_ID"].
-                                             map(df.set_index("GEO_ID")["landfill_accu_PaintMass"]))
-check = pd.DataFrame(landfill_accu_PaintMass_ct.iloc[:, 4:].sum()/1000000, columns=['sum'])
-# landfill_accu_PaintMass_ct.to_csv('landfill_accu_PaintMass_ct.csv', index=False)
+    df.to_csv(out_dir/f'landfill_accu_PaintMass_{year}.csv', index=False)
+
 
 # Calculate the PFAS emission through landfill leachate and landfill gas
-path = 'C:/Users/mchen48/Box/01 Research/PFASs/PFAS in paints/Data collection/Data processing_pfas in paint_2'
-landfill_paint_assignment = pd.read_csv('landfills_paint_assignment.csv') # in the unit of kg
-landfill_pfas_assignment = pd.read_csv('landfills_pfas_assignment.csv')  # in the unit of gram
+path = 'C:/Users/mchen48/Box/01 Research/PFASs/PFAS in paints/Data collection/data share/updated_march'
+landfill_paint_assignment = pd.read_csv(f'{path}/landfills_paint_assignment_v2.csv') # in the unit of kg
+landfill_pfas_assignment = pd.read_csv(f'{path}/landfills_pfas_assignment_v2.csv')  # in the unit of gram
 
 path = 'C:/Users/mchen48/Box/01 Research/PFASs/PFASs_in_Carpet/Weather data'
 precipitation_county_inch_9060 = pd.read_csv(f'{path}/Precipitation_County_inch_1990-2060.csv')
-precipitation_county_inch_2060 = precipitation_county_inch_9060.copy()
-precipitation_county_inch_2060 = precipitation_county_inch_2060.drop(columns=[str(year) for year in range(1990, 2020)])
+precipitation_county_inch_0060 = precipitation_county_inch_9060.copy()
+precipitation_county_inch_0060 = precipitation_county_inch_0060.drop(columns=[str(year) for year in range(1990, 2000)])
 
 # clean the information of C&D landfills and get the county and state information for each C&D landfills
 cd_landfills_filtered = pd.read_csv('cd_landfills_filtered.csv')
@@ -1559,12 +1844,12 @@ new_order = (
 
 landfill_pfas_assignment_final = landfill_pfas_assignment_final[new_order]
 # landfill_pfas_assignment_final = landfill_pfas_assignment_final.drop(columns=['facility_x','facility_y'])
-landfill_pfas_assignment_final.loc[:, "2020":"2060"] = landfill_pfas_assignment_final.loc[:, "2020":"2060"]/1000000
+landfill_pfas_assignment_final.loc[:, "2000":"2060"] = landfill_pfas_assignment_final.loc[:, "2000":"2060"]/1000000
 # in the unit of tonnes
-# landfill_pfas_assignment_final.to_csv('landfill_pfas_assignment_final.csv', index=False)
+landfill_pfas_assignment_final.to_csv('landfill_pfas_assignment_final.csv', index=False)
 
 # Add the gdf_joined information to landfills assigned paint mass, and extract the precipitation information for
-# each landfills from 2020 to 2060, and finally calculate the PFAS emission through leachate and gas
+# each landfills from 2000 to 2060, and finally calculate the PFAS emission through leachate and gas
 landfill_paint_assignment_final = landfill_paint_assignment.merge(
     gdf_joined,
     on="DDRT_ID",
@@ -1590,34 +1875,39 @@ landfill_paint_assignment_final = landfill_paint_assignment_final[new_order]
 
 # extract the landfill precipitation
 # change the GeoID to 5 digits
-precipitation_county_inch_2060["GeoID"] = (
-    precipitation_county_inch_2060["GeoID"]
+precipitation_county_inch_0060["GeoID"] = (
+    precipitation_county_inch_0060["GeoID"]
     .astype(str)
     .str.zfill(5)
 )
 
 cd_landfill_precipitation = landfill_paint_assignment_final[['DDRT_ID', 'GeoID']]  # Here 'cd' represent C&D
 cd_landfill_precipitation_final = cd_landfill_precipitation.merge(
-    precipitation_county_inch_2060,
+    precipitation_county_inch_0060,
     on="GeoID",
     how="left"
 )  # in the unit of 'inch'
 
 # calculate the landfill emission through leachate, we use the central scenario for analysis
 landfill_leachate_final = landfill_paint_assignment_final.copy()
-landfill_leachate_final.loc[:, "2020":"2060"] = (landfill_paint_assignment_final.loc[:, "2020":"2060"]/1e3
-                                                 * params_scenarios.loc['leachate_con_nonVola', 'mean'] * 1000
-                                                 * (2 * cd_landfill_precipitation_final.loc[:, "2020":"2060"] * 2.54/47)
+landfill_leachate_final.loc[:, "2000":"2060"] = (landfill_paint_assignment_final.loc[:, "2000":"2060"]/1e3
+                                                 * params_scenarios.loc['Leachate_con_nonVola', 'mean'] * 1000
+                                                 * (2 * cd_landfill_precipitation_final.loc[:, "2000":"2060"] * 2.54/47)
                                                  * 365/140)/1e9  # in the unit of gram
 landfill_LFG_final = landfill_paint_assignment_final.copy()
-landfill_LFG_final.loc[:, "2020":"2060"] = (landfill_paint_assignment_final.loc[:, "2020":"2060"]
+landfill_LFG_final.loc[:, "2000":"2060"] = (landfill_paint_assignment_final.loc[:, "2000":"2060"]
                                             * 1e-3 * params_scenarios.loc['LFG_con_vola', 'mean']
-                                            * params_scenarios.loc['LFG_gen_rate', 'mean']
+                                            * (params_scenarios.loc['LFG_gen_rate', 'mean']*
+                                               landfill_paint_assignment_final['LF-MSW']
+                                               .fillna('No')
+                                               .map({'Yes': 1, 'No': 0.1})
+                                               .to_numpy()[:,None]
+                                               )
                                             * 365 / 140)/1e9  # in the unit of gram
 landfill_emission_final = landfill_paint_assignment_final.copy()
-landfill_emission_final.loc[:, '2020':'2060'] = (landfill_leachate_final.loc[:, "2020":"2060"]
-                                                 + landfill_LFG_final.loc[:, "2020":"2060"])  # in the unit of gram
-# landfill_emission_final.to_csv('landfill_emission_final.csv', index=False)
+landfill_emission_final.loc[:, '2000':'2060'] = (landfill_leachate_final.loc[:, "2000":"2060"]
+                                                 + landfill_LFG_final.loc[:, "2000":"2060"])  # in the unit of gram
+landfill_emission_final.to_csv('landfill_emission_final.csv', index=False)
 # Visualization of landfill paint PFAS accumulation and emission in the landfills
 # for landfill PFAS accumulation, the unit is tonnes, for landfill PFAS emission, the unit is gram/year
 
@@ -1665,48 +1955,274 @@ subset['Annual Waste Acceptance Rate (metric tonnes)'] = subset['Annual Waste Ac
 subset['waste_acceptance_log'] = np.log1p(subset['Annual Waste Acceptance Rate (metric tonnes)'])
 
 # calculate the correlation between waste in place and the mass_2021
-corr_coeff, p_value = stats.pearsonr(subset['waste_acceptance_log'], subset['paint_accepted_2022_log'])
+x = subset['waste_acceptance_log']
+y = subset['paint_accepted_2022_log']
+mask = np.isfinite(x) & np.isfinite(y)
+corr_coeff, p_value = stats.pearsonr(x[mask], y[mask])
 print(f'Pearson correlation coefficient: {corr_coeff:.4f}')
 print(f'P-value: {p_value:.4f}')
 
 # fit a linear regression using this data
-X = subset[['paint_accepted_2022_log']].values  # Reshape needed for sklearn
-y = subset['waste_acceptance_log'].values
+clean = subset[['paint_accepted_2022_log', 'waste_acceptance_log']].copy()
+clean = clean.replace([np.inf, -np.inf], np.nan).dropna()
+X = clean[['paint_accepted_2022_log']].values
+y = clean['waste_acceptance_log'].values
+# Pearson correlation
+corr_coeff, p_value = stats.pearsonr(
+    clean['waste_acceptance_log'],
+    clean['paint_accepted_2022_log']
+)
+
+# Fit linear regression
 model = LinearRegression()
 model.fit(X, y)
+
 # Predict values
 y_pred = model.predict(X)
+
 # Calculate R²
 r2 = r2_score(y, y_pred)
 
+# Sort X for a clean regression line
+sort_idx = np.argsort(X.flatten())
+X_sorted = X.flatten()[sort_idx]
+y_pred_sorted = y_pred[sort_idx]
+
+# Plot settings
 plt.rcParams['font.family'] = 'Arial'
-plt.rcParams['font.size'] = 14
-# Plot scatter plot
-plt.figure(figsize=(10, 8))
-plt.scatter(X, y, color='blue', alpha=0.6, label='Data', edgecolors='k')
-# Plot regression line
-plt.plot(X, y_pred, color='red', linewidth=2, label=f'Linear Fit')
-# Labels and title
-plt.xlabel('Predicted paint mass assigned in 2022\n(log tonnes)')
-plt.ylabel('Waste accepted in 2022 from LMOP databset \n(log tonnes)')
-# plt.title('Correlation between accumulated landfill waste and predicted carpet mass\n (Log-Log scale) ')
-# Annotate correlation coefficient and p-value
+plt.rcParams['font.size'] = 10
+
+# Plot
+plt.figure(figsize=(10, 8),constrained_layout=True)
+plt.scatter(
+    X, y,
+    color='blue',
+    alpha=0.6,
+    label='Data',
+    edgecolors='k'
+)
+plt.plot(
+    X_sorted, y_pred_sorted,
+    color='red',
+    linewidth=2,
+    label='Linear fit'
+)
+
+plt.xlabel('Log-transformed predicted paint mass assigned in 2022\nln(1 + tonnes)', fontsize=16)
+plt.ylabel('Log-transformed waste accepted in 2022 from LMOP\nln(1 + tonnes)', fontsize=16)
+
 plt.text(
-    0.05, 0.9,
-    f'Pearson r = {corr_coeff:.2f}\np-value = {p_value:.3g}',
+    0.05, 0.90,
+    f'Pearson r = {corr_coeff:.2f}\np-value = {p_value:.3g}\n$R^2$ = {r2:.2f}',
     transform=plt.gca().transAxes,
     fontsize=14,
-    fontdict={'family': 'Arial'},  # Set Arial font
+    fontdict={'family': 'Arial'}
 )
-# Grid and legend
+
 plt.grid(True, which='both', linestyle='--', linewidth=0.5, alpha=0.7)
 plt.legend()
-# Show plot
+plt.tight_layout()
+plt.savefig('landfill assignment validation.png', dpi=300, bbox_inches='tight')
+plt.show()
+
+# comparison the result from carpet and paint
+# Data
+years = ['2020', '2060']
+
+carpet = {
+    "stock": [722, 730],
+    "emission": [5.5, 6.9],
+    "landfill_acc": [798, 1845],
+    "landfill_em": [4.5, 9.0]
+}
+
+paint = {
+    "stock": [947, 1887],
+    "emission": [38, 62],
+    "landfill_acc": [110, 888],
+    "landfill_em": [1.5, 14.6]
+}
+
+titles = [
+    "(a) In-use Stock",
+    "(b) In-use Emission",
+    "(c) Landfill Accumulation",
+    "(d) Landfill Emission"
+]
+
+ylabels = [
+    "Tonnes",
+    "Tonnes yr$^{-1}$",
+    "Tonnes",
+    "Tonnes yr$^{-1}$"
+]
+
+carpet_data = [
+    carpet["stock"],
+    carpet["emission"],
+    carpet["landfill_acc"],
+    carpet["landfill_em"]
+]
+
+paint_data = [
+    paint["stock"],
+    paint["emission"],
+    paint["landfill_acc"],
+    paint["landfill_em"]
+]
+
+x = np.arange(len(years))
+width = 0.35
+
+plt.rcParams["font.family"] = "Arial"
+
+fig, axs = plt.subplots(2, 2, figsize=(10,8))
+axs = axs.flatten()
+
+for i, ax in enumerate(axs):
+
+    ax.bar(x - width/2, carpet_data[i], width,
+           color='blue', alpha=0.6, label='Carpet')
+
+    ax.bar(x + width/2, paint_data[i], width,
+           color='red', alpha=0.6, label='Paint')
+
+    ax.set_title(titles[i])
+    ax.set_xticks(x)
+    ax.set_xticklabels(years)
+    ax.set_ylabel(ylabels[i])
+
+handles, labels = axs[0].get_legend_handles_labels()
+
+fig.legend(handles, labels,
+           loc='lower center',
+           ncol=2,
+           frameon=True)
+
+plt.tight_layout(rect=[0,0.08,1,1])
+plt.savefig('Comparison carpet and paint.png', dpi=300, bbox_inches="tight")
 plt.show()
 
 
-# cd_and_msw = cd_landfills_filtered[cd_landfills_filtered['LF-MSW'] == 'Yes']
-# df = cd_and_msw.merge(LMOP_validate[['Landfill Name', 'Physical Address', 'Zip', 'Waste in Place (tons)',
-#                                      'Waste in Place Year']],
-#                       on='Zip', how='left')
-# cd_and_msw.to_csv('cd&msw.csv', index = False)
+years = ['2020', '2060']
+
+carpet = {
+    "stock": [722, 730],
+    "emission": [5.5, 6.9],
+    "landfill_acc": [798, 1845],
+    "landfill_em": [4.5, 9.0]
+}
+
+paint = {
+    "stock": [520.0, 1168.75],          # indoor + outdoor
+    "emission": [12.62, 20.67],         # indoor + outdoor
+    "landfill_acc": [110, 888],
+    "landfill_em": [1.5, 14.6]
+}
+
+# split indoor / outdoor for paint in-use stock and in-use emission
+paint_indoor = {
+    "stock": [156.85, 241.79],
+    "emission": [1.65, 3.79]
+}
+
+paint_outdoor = {
+    "stock": [363.14, 926.96],
+    "emission": [10.97, 16.88]
+}
+
+titles = [
+    "(a) In-use Stock",
+    "(b) In-use Emission",
+    "(c) Landfill Accumulation",
+    "(d) Landfill Emission"
+]
+
+ylabels = [
+    "Tonnes",
+    "Tonnes yr$^{-1}$",
+    "Tonnes",
+    "Tonnes yr$^{-1}$"
+]
+
+carpet_data = [
+    carpet["stock"],
+    carpet["emission"],
+    carpet["landfill_acc"],
+    carpet["landfill_em"]
+]
+
+paint_data = [
+    paint["stock"],
+    paint["emission"],
+    paint["landfill_acc"],
+    paint["landfill_em"]
+]
+
+x = np.arange(len(years))
+width = 0.35
+
+plt.rcParams["font.family"] = "Arial"
+
+fig, axs = plt.subplots(2, 2, figsize=(10, 8))
+axs = axs.flatten()
+
+for i, ax in enumerate(axs):
+    # carpet bars
+    ax.bar(
+        x - width/2, carpet_data[i], width,
+        color='blue', alpha=0.6, label='Carpet'
+    )
+
+    # paint bars
+    if i == 0:  # (a) In-use Stock
+        ax.bar(
+            x + width/2, paint_indoor["stock"], width,
+            color='red', alpha=0.2, label='Paint indoor'
+        )
+        ax.bar(
+            x + width/2, paint_outdoor["stock"], width,
+            bottom=paint_indoor["stock"],
+            color='red', alpha=0.5, label='Paint outdoor'
+        )
+
+    elif i == 1:  # (b) In-use Emission
+        ax.bar(
+            x + width/2, paint_indoor["emission"], width,
+            color='red', alpha=0.2, label='Paint indoor'
+        )
+        ax.bar(
+            x + width/2, paint_outdoor["emission"], width,
+            bottom=paint_indoor["emission"],
+            color='red', alpha=0.5, label='Paint outdoor'
+        )
+
+    else:  # (c) and (d) unchanged
+        ax.bar(
+            x + width/2, paint_data[i], width,
+            color='red', label='Paint'
+        )
+
+    ax.set_title(titles[i])
+    ax.set_xticks(x)
+    ax.set_xticklabels(years)
+    ax.set_ylabel(ylabels[i])
+
+# custom legend
+legend_handles = [
+    Patch(facecolor='blue', alpha=0.6, label='Carpet'),
+    Patch(facecolor='red', alpha=0.2, label='Paint indoor'),
+    Patch(facecolor='red', alpha=0.5, label='Paint outdoor'),
+    Patch(facecolor='red', label='Paint')
+]
+
+fig.legend(
+    handles=legend_handles,
+    loc='lower center',
+    ncol=4,
+    frameon=True
+)
+
+plt.tight_layout(rect=[0, 0.10, 1, 1])
+plt.savefig('Comparison_carpet_and_paint_stacked.png', dpi=300, bbox_inches="tight")
+plt.show()
